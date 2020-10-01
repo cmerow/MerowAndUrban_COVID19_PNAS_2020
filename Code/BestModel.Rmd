@@ -1,0 +1,114 @@
+---
+title: "Code for Merow and Urban 2020 PNAS"
+author: "Cory Merow and Mark Urban"
+date: "4/8/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,message=FALSE}
+library(lubridate)
+library(lme4)
+library(MCMCglmm)
+library(ggplot2)
+library(bayesplot)
+library(raster)
+library(tidyverse)
+
+library(corrplot)
+library(broom)
+library(rstan)
+library(rstanarm)
+
+options(contrasts = rep ("contr.sum", 2))
+cleanDir='/Users/ctg/Dropbox/Projects/COVID/covid19_DataPrep/CleanedData'
+nWorstWeeks=3
+```
+
+```{r}
+d.all=read.csv(paste0(cleanDir,'/forRegression_v14_40.csv')) %>% 
+  filter(!is.na(TempLag14mean) & !is.na(admPop)) %>%
+  #filter(!dateFirstInfection=='2020-01-22') %>%
+  mutate(t0=as_date(t0),dateFirstInfection=as_date(dateFirstInfection)) %>% 
+  mutate(lambda7=(log(nNewIn7Days+n)-log(n))/7,
+         lambda14=(log(nNewIn14Days+n)-log(n))/14) %>% 
+  mutate(polity=paste0(Alpha_3,adm1InCovid,sep='_'))
+# %>% filter(n<5000) # don't need this if we're useing the worst two weeks
+
+cov=c("TempLag14mean","TempLag7mean", "TempLag14max" ,"TempLag7max",
+      "TempLag14min" ,"TempLag7min", "rhLag7mean" ,"rhLag14mean","rhLag14max",
+      "rhLag7max","rhLag14min", "rhLag7min" ,"uvLag7mean","uvLag14mean",
+      "uvLag7max","uvLag14max","uvLag7min","uvLag14min","ahLag7mean","ahLag14mean",
+      "ahLag7max","ahLag14max","ahLag7min","ahLag14min",
+      "admPop","propOld")
+keep=complete.cases(d.all[,cov[c(1,7,15,21,25)]])
+d1.all=d.all[keep,]
+d.all[,cov]=scale(d.all[,cov])
+hist(log(d.all$n))
+dim(d.all)
+
+# find the N worst weeks
+d.worst=d.all %>% group_by(polity) %>%
+  top_n(nWorstWeeks,lambdaFromAlgebraLag7)
+
+```
+  
+```{r,cache=TRUE}
+d=d.worst
+m.best = stan_glmer(lambda7 ~TempLag14mean+uvLag14max+
+                      rhLag14mean  + propOld + (1|Alpha_3), 
+                 family=gaussian(link='log'),
+                 data = d, iter = 8000, cores=3, refresh=0,
+                 warmup = 200,chains = 1, thin = 5) 
+# 1 chain is used here as a demo because parallellization is not working for STAN with R 4.0 on Catalina. Models used in the publication used 3 chains.
+```
+
+```{r}
+rsq <- bayes_R2(m.best)
+median(rsq)
+hist(rsq)
+stan_trace(m.best)
+raftery.diag(m.best)
+stan_ac(m.best)
+```
+
+```{r,cache=T}
+pp_check(m.best)
+pp=posterior_predict(m.best)
+```
+
+```{r}
+mcmc_areas(m.best,
+  pars=c('(Intercept)','TempLag14mean','rhLag14mean','uvLag14max','propOld'))
+```
+
+
+# Plots for supplement
+
+## posterior predictive distributions for against each predictor
+
+```{r}
+library(gridExtra)
+pp=posterior_predict(m.best)
+p1=bayesplot::ppc_intervals(y = d$lambda7, yrep = pp,
+                            x = as.vector(d.worst$TempLag14mean)) +
+  ggplot2::xlab("Mean Temperature in Past 14 Days") +
+  ggplot2::ylab("Growth Rate") 
+p2=bayesplot::ppc_intervals(y = d$lambda7, yrep = pp,
+                            x = as.vector(d.worst$rhLag14mean)) + 
+  ggplot2::xlab("Mean Relative Humidity in Past 14 Days")+ 
+  ggplot2::ylab("Growth Rate") 
+p3=bayesplot::ppc_intervals(y = d$lambda7, yrep = pp,
+                            x = as.vector(d.worst$uvLag14max)) + 
+  ggplot2::xlab("Maximum Daily UV in Past 14 Days")+ 
+  ggplot2::ylab("Growth Rate") 
+p4=bayesplot::ppc_intervals(y = d$lambda7, yrep = pp,
+                            x = as.vector(d.worst$propOld)) + 
+  ggplot2::xlab("Proportion of Population Over 60") +
+  ggplot2::ylab("Growth Rate") 
+grid.arrange(p1, p2, p3,p4, nrow = 2)
+```
+
